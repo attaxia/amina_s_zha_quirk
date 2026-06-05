@@ -38,6 +38,7 @@ from zigpy.quirks.v2.homeassistant.sensor import SensorDeviceClass, SensorStateC
 import zigpy.types as t
 from zigpy.zcl import foundation
 from zigpy.zcl.clusters.general import LevelControl, OnOff
+from zigpy.zcl.clusters.homeautomation import ElectricalMeasurement
 from zigpy.zcl.foundation import BaseAttributeDefs, GeneralCommand, ZCLAttributeDef
 
 # NOTE: this must match the manufacturer string the device actually reports
@@ -316,6 +317,49 @@ class AminaOnOff(CustomCluster, OnOff):
         )
 
 
+class AminaElectricalMeasurement(CustomCluster, ElectricalMeasurement):
+    """Electrical Measurement that polls the energy counters on power updates.
+
+    The charger does not support attribute reporting for Total Active Energy
+    (0xFEE7 / 0x0010) or Last Session Energy (0x0011), so those entities would
+    otherwise only ever reflect the value read once at start-up. Following the
+    Zigbee2MQTT converter's approach, we piggy-back on the reportable
+    TotalActivePower attribute: each time a power update arrives we read the
+    energy counters from the sibling 0xFEE7 cluster on the same endpoint.
+    """
+
+    async def bind(self):
+        """Ensure TotalActivePower actually reports so the poll has a trigger."""
+        result = await super().bind()
+        try:
+            await self.configure_reporting(
+                attribute=ElectricalMeasurement.AttributeDefs.total_active_power.id,
+                min_interval=30,
+                max_interval=3600,
+                reportable_change=1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.debug("configure_reporting for total_active_power failed: %s", exc)
+        return result
+
+    def _update_attribute(self, attrid: int, value: Any) -> None:
+        super()._update_attribute(attrid, value)
+        if attrid == ElectricalMeasurement.AttributeDefs.total_active_power.id:
+            # Fire-and-forget; failures are logged inside the coroutine.
+            asyncio.ensure_future(self._poll_energy_counters())
+
+    async def _poll_energy_counters(self) -> None:
+        amina = self.endpoint.in_clusters.get(AMINA_CONTROL_CLUSTER_ID)
+        if amina is None:
+            return
+        try:
+            await amina.read_attributes(
+                ["total_active_energy", "last_session_energy"]
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.debug("energy counter poll failed: %s", exc)
+
+
 class AminaLevelControl(CustomCluster, LevelControl):
     """Level Control that turns current_level writes into moveToLevel commands.
 
@@ -450,6 +494,7 @@ class AminaLevelControl(CustomCluster, LevelControl):
     .replaces(AminaControlCluster, endpoint_id=AMINA_ENDPOINT)
     .replaces(AminaLevelControl, endpoint_id=AMINA_ENDPOINT)
     .replaces(AminaOnOff, endpoint_id=AMINA_ENDPOINT)
+    .replaces(AminaElectricalMeasurement, endpoint_id=AMINA_ENDPOINT)
     # -------- Charging current ------------------------------------------
     # The slider's upper bound is hard-coded to the spec maximum (32A)
     # because QuirkBuilder v2 doesn't support binding a number entity's
@@ -551,8 +596,10 @@ class AminaLevelControl(CustomCluster, LevelControl):
         fallback_name="Alarm active",
     )
     # -------- Energy counters ------------------------------------------
-    # The charger doesn't support attribute reporting for these yet, but HA
-    # will poll them periodically via the sensor entity.
+    # The charger doesn't support attribute reporting for these, so
+    # AminaElectricalMeasurement re-reads them whenever TotalActivePower
+    # reports (i.e. roughly every 30s-1h while charging, sooner when power
+    # changes). They are also primed once on bind / restart.
     .sensor(
         attribute_name=AminaControlCluster.AttributeDefs.total_active_energy.name,
         cluster_id=AMINA_CONTROL_CLUSTER_ID,
