@@ -1,0 +1,8 @@
+# Local editor / harness config
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
