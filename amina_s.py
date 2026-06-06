@@ -386,9 +386,14 @@ class AminaLevelControl(CustomCluster, LevelControl):
 
     The charger's Level Control cluster reports current_level as "Read Report"
     only; to change the allowed charging current the spec says to send a
-    moveToLevel (or moveToLevelWithOnOff) command. Translating attribute
-    writes into commands lets the ZHA number entity target current_level
-    directly.
+    moveToLevel command. Translating attribute writes into commands lets the
+    ZHA number entity target current_level directly.
+
+    We deliberately use the plain MoveToLevel (0x00) command rather than the
+    MoveToLevelWithOnOff (0x04) variant: the latter also arms the charger
+    whenever the level is non-zero, which caused the on/off switch to flicker
+    on (then off) when the current limit was changed while the charger was
+    off. Arming stays the sole responsibility of the On/Off switch.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -471,7 +476,7 @@ class AminaLevelControl(CustomCluster, LevelControl):
                     max_level,
                 )
 
-            await self.move_to_level_with_on_off(
+            await self.move_to_level(
                 level=clamped_level,
                 transition_time=0,
             )
