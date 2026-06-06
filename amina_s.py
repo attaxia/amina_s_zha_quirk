@@ -266,6 +266,23 @@ class AminaOnOff(CustomCluster, OnOff):
     "do nothing / disarm" is the safer default.
     """
 
+    def _update_attribute(self, attrid: int, value: Any) -> None:
+        super()._update_attribute(attrid, value)
+        if attrid == OnOff.AttributeDefs.on_off.id:
+            # Arming / disarming changes the charging state, but the charger
+            # may not immediately push an ev_status report. Re-read it so the
+            # derived status entities update promptly.
+            asyncio.ensure_future(self._refresh_ev_status())
+
+    async def _refresh_ev_status(self) -> None:
+        amina = self.endpoint.in_clusters.get(AMINA_CONTROL_CLUSTER_ID)
+        if amina is None:
+            return
+        try:
+            await amina.read_attributes(["ev_status"])
+        except Exception as exc:  # noqa: BLE001
+            self.debug("ev_status refresh after on/off change failed: %s", exc)
+
     async def command(
         self,
         command_id: GeneralCommand | int | str,
@@ -346,18 +363,22 @@ class AminaElectricalMeasurement(CustomCluster, ElectricalMeasurement):
         super()._update_attribute(attrid, value)
         if attrid == ElectricalMeasurement.AttributeDefs.total_active_power.id:
             # Fire-and-forget; failures are logged inside the coroutine.
-            asyncio.ensure_future(self._poll_energy_counters())
+            asyncio.ensure_future(self._poll_on_power_update())
 
-    async def _poll_energy_counters(self) -> None:
+    async def _poll_on_power_update(self) -> None:
         amina = self.endpoint.in_clusters.get(AMINA_CONTROL_CLUSTER_ID)
         if amina is None:
             return
         try:
+            # Re-read ev_status alongside the energy counters: the charger
+            # does not always push a fresh ev_status report when charging
+            # stops, so the "Charging" / "EV status" entities can otherwise
+            # stay stuck on "Charging" even after power has dropped to zero.
             await amina.read_attributes(
-                ["total_active_energy", "last_session_energy"]
+                ["ev_status", "total_active_energy", "last_session_energy"]
             )
         except Exception as exc:  # noqa: BLE001
-            self.debug("energy counter poll failed: %s", exc)
+            self.debug("post-power-update poll failed: %s", exc)
 
 
 class AminaLevelControl(CustomCluster, LevelControl):
