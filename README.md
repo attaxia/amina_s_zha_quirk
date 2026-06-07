@@ -15,10 +15,8 @@ and learns from the community
 [Zigbee2MQTT converter by somlioy](https://github.com/somlioy/amina_s).
 
 > **Status / disclaimer.** This is an unofficial, community quirk. It has been
-> written carefully against the spec but is provided as-is. Amina is primarily
-> a hardware manufacturer and does not support custom Home Assistant setups.
-> Always treat an EV charger as safety-critical equipment — test changes
-> before relying on them in automations.
+> written carefully against the spec but is provided as-is. I have tested it only
+> in a single-phase setup.
 
 ---
 
