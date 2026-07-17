@@ -159,6 +159,11 @@ class AminaControlCluster(CustomCluster):
         self._priming_task: asyncio.Task | None = asyncio.ensure_future(
             self._prime_status_attributes()
         )
+        # Last accepted total_active_energy reading, used to reject spurious
+        # drops (see _update_attribute). In-memory only: a HA restart clears
+        # it, so a genuine counter reset (device swap / factory reset) is
+        # picked up again after the next restart at the latest.
+        self._last_good_total_energy: int | None = None
 
     async def _prime_status_attributes(self) -> None:
         # Brief delay so the network and parent device have finished coming
@@ -202,6 +207,26 @@ class AminaControlCluster(CustomCluster):
         return result
 
     def _update_attribute(self, attrid: int, value: Any) -> None:
+        # Total Active Energy is a monotonic lifetime counter and its HA
+        # sensor is `total_increasing`, so a lower reading would be booked by
+        # HA as a meter reset — one corrupted/zero read followed by recovery
+        # would inflate long-term statistics by the whole lifetime total.
+        # A decrease can therefore never be legitimate; drop it instead of
+        # propagating it.
+        if attrid == self.AttributeDefs.total_active_energy.id and value is not None:
+            if (
+                self._last_good_total_energy is not None
+                and int(value) < self._last_good_total_energy
+            ):
+                self.warning(
+                    "Discarding suspect total_active_energy read %s"
+                    " (last good value: %s)",
+                    value,
+                    self._last_good_total_energy,
+                )
+                return
+            self._last_good_total_energy = int(value)
+
         super()._update_attribute(attrid, value)
 
         if value is None:
@@ -345,6 +370,14 @@ class AminaElectricalMeasurement(CustomCluster, ElectricalMeasurement):
     energy counters from the sibling 0xFEE7 cluster on the same endpoint.
     """
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Serializes the post-report polls: a slow read (radio retries can
+        # outlast the report interval) must not get overlapping reads
+        # stacked on top of it — that is exactly the situation in which the
+        # charger has been seen returning corrupt energy values.
+        self._poll_lock = asyncio.Lock()
+
     async def bind(self):
         """Ensure TotalActivePower actually reports so the poll has a trigger."""
         result = await super().bind()
@@ -366,6 +399,15 @@ class AminaElectricalMeasurement(CustomCluster, ElectricalMeasurement):
             asyncio.ensure_future(self._poll_on_power_update())
 
     async def _poll_on_power_update(self) -> None:
+        if self._poll_lock.locked():
+            # A poll is already in flight; skip rather than queue. The next
+            # power report (at most ~30s away while charging) triggers a
+            # fresh poll, so we catch up quickly once the radio settles.
+            return
+        async with self._poll_lock:
+            await self._read_energy_counters()
+
+    async def _read_energy_counters(self) -> None:
         amina = self.endpoint.in_clusters.get(AMINA_CONTROL_CLUSTER_ID)
         if amina is None:
             return
