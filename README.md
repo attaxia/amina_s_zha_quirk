@@ -36,7 +36,7 @@ power and frequency that ZHA already provides):
 | **Enable offline mode** | Switch | Apply offline behaviour when the Zigbee connection is lost. |
 | **Offline: single-phase** | Switch | Use single-phase charging while offline. |
 | **Offline current limit** | Number (6–32 A) | Current to draw while the charger is offline. |
-| **Time to offline** | Number (0–3600 s) | Delay before offline behaviour kicks in after connection loss. |
+| **Time to offline** | Number (0–60 s) | Delay before offline behaviour kicks in after connection loss. |
 
 ### Status sensors
 
